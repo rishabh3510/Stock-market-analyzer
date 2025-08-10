@@ -1,0 +1,327 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>AI Stock Analyzer — Phase 2 (Predict & Chart)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js"></script>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--muted:#9ca3af;--accent:#10b981}
+    body{font-family:Inter,system-ui,Arial;margin:0;background:linear-gradient(180deg,#071026 0,#0f1724 100%);color:#e6eef8;padding:18px}
+    .wrap{max-width:1100px;margin:0 auto}
+    header{display:flex;align-items:center;gap:12px}
+    h1{margin:0;color:var(--accent)}
+    .controls{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
+    input[type="text"],input[type="number"]{padding:10px;border-radius:8px;border:1px solid #111;background:#0b1220;color:#e6eef8;min-width:220px}
+    button{background:var(--accent);border:none;padding:10px 16px;border-radius:8px;color:#012;cursor:pointer;font-weight:600}
+    .grid{display:grid;grid-template-columns:1fr 380px;gap:16px;margin-top:18px}
+    .card{background:var(--card);padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(2,6,23,.6)}
+    .muted{color:var(--muted);font-size:13px}
+    .stockCard{margin-bottom:12px}
+    canvas{background:transparent;border-radius:6px}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{padding:8px;text-align:left;border-bottom:1px solid rgba(255,255,255,.03)}
+    .profit{color:#10b981;font-weight:700}
+    .loss{color:#ff6b6b;font-weight:700}
+    .small{font-size:13px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img src="" alt="" style="width:36px;height:36px;border-radius:8px;background:#062a2b;margin-right:10px" />
+      <div>
+        <h1>AI Stock Analyzer — Predict & Chart</h1>
+        <div class="small">Phase 2 — historic data, per-stock prediction (tiny TF.js model), charting, allocation</div>
+      </div>
+    </header>
+
+    <div class="controls">
+      <input id="symbols" type="text" placeholder="Symbols (comma separated) e.g., RELIANCE.NS, INFY, TCS" value="AAPL">
+      <input id="budget" type="number" placeholder="Budget (INR)" value="50000">
+      <input id="apiKey" type="text" placeholder="Alpha Vantage API key (optional)" value="RKNNU5LYWQ4P3CDA">
+      <button id="analyzeBtn">Analyze</button>
+      <div style="align-self:center;margin-left:6px" class="small muted">Note: free Alpha Vantage has rate limits — fallback to demo data if limited.</div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <div id="chartsArea" class="card">
+          <div id="chartsInner" style="max-height:64vh;overflow:auto;padding-right:8px"></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h3>Portfolio Recommendation</h3>
+          <div id="summary" class="small muted">No analysis yet.</div>
+          <div id="allocTable"></div>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <h4>How this prediction works</h4>
+          <ul class="small muted">
+            <li>Fetches last ~60 trading days (adjusted close).</li>
+            <li>Trains a tiny linear model (time → price) using TensorFlow.js to predict the next day price.</li>
+            <li>Predicted return% = (predicted - last)/last. Positive returns prioritized for allocation.</li>
+            <li>Fallback synthetic data ensures demo always works (useful for demos & interviews).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ---------- Configuration ---------- */
+const DEFAULT_API_KEY = document.getElementById('apiKey').value.trim() || ''; // set by input's default
+const ALPHA_BASE = 'https://www.alphavantage.co/query';
+const DAYS = 60;               // how many historical days to attempt to use
+const RATE_LIMIT_MS = 12000;   // delay between API calls (be polite)
+
+/* ---------- Utilities ---------- */
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function safeNum(n){ return (typeof n === 'number' && !isNaN(n)) ? n : null; }
+function format2(n){ return Number(n).toLocaleString(undefined,{maximumFractionDigits:2}); }
+
+/* ---------- Fetch historical series from Alpha Vantage ---------- */
+async function fetchTimeSeries(symbol, apiKey){
+  try {
+    const url = `${ALPHA_BASE}?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(symbol)}&outputsize=compact&apikey=${apiKey}`;
+    const resp = await fetch(url);
+    const j = await resp.json();
+    if(j.Note || j['Error Message'] || !j['Time Series (Daily)']) {
+      // API limit or error
+      console.warn('AlphaVantage note/error for', symbol, j.Note || j['Error Message']);
+      return null;
+    }
+    const ts = j['Time Series (Daily)'];
+    const rows = Object.keys(ts).slice(0, DAYS).reverse().map(date => ({ date, close: parseFloat(ts[date]['5. adjusted close']) }));
+    return rows;
+  } catch (e) {
+    console.error('fetch error', e);
+    return null;
+  }
+}
+
+/* ---------- Synthetic fallback series (deterministic per-symbol) ---------- */
+function synthSeries(symbol, n=DAYS){
+  // deterministic pseudo-random seed from symbol
+  let seed = 0;
+  for (let i=0;i<symbol.length;i++) seed = (seed*31 + symbol.charCodeAt(i)) & 0xffffffff;
+  const base = 100 + (seed % 300);
+  const out = [];
+  let val = base;
+  for(let i=0;i<n;i++){
+    // simple random walk with small drift
+    const rnd = ((seed % 21) - 10)/1000; // small step
+    val = Math.max(1, val * (1 + rnd + (Math.sin(i/6)/200)));
+    out.push({ date: `d${i}`, close: parseFloat(val.toFixed(2)) });
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+  }
+  return out;
+}
+
+/* ---------- Tiny TF linear model: time index -> price ---------- */
+async function trainAndPredict(series){
+  // series: array of {date, close} ordered oldest->newest
+  // Build x = [0..n-1], y = prices
+  const prices = series.map(r => r.close);
+  const n = prices.length;
+  if (n < 6) return null;
+
+  // normalize for more stable training
+  const maxP = Math.max(...prices);
+  const xs = tf.tensor1d(prices.map((_,i)=>i / (n-1)));
+  const ys = tf.tensor1d(prices.map(p => p / maxP));
+
+  // simple linear model y = a*x + b
+  const model = tf.sequential();
+  model.add(tf.layers.dense({units:1, inputShape:[1]}));
+  model.compile({optimizer: tf.train.adam(0.1), loss: 'meanSquaredError'});
+
+  // reshape xs to [n,1]
+  const xs2 = xs.reshape([n,1]);
+  const ys2 = ys.reshape([n,1]);
+
+  // train for small number of epochs (fast)
+  await model.fit(xs2, ys2, {epochs: 60, verbose:0});
+
+  // predict for next point x = n / (n-1)
+  const nextX = tf.tensor2d([[n / (n-1)]]);
+  let predNorm = model.predict(nextX).dataSync()[0];
+  // convert back to price scale
+  const predPrice = predNorm * maxP;
+
+  // cleanup
+  xs.dispose(); ys.dispose(); xs2.dispose(); ys2.dispose(); nextX.dispose(); model.dispose();
+
+  return predPrice;
+}
+
+/* ---------- Main analyze flow ---------- */
+document.getElementById('analyzeBtn').addEventListener('click', runAnalysis);
+
+async function runAnalysis(){
+  const raw = document.getElementById('symbols').value.trim();
+  const budget = parseFloat(document.getElementById('budget').value);
+  const key = (document.getElementById('apiKey').value || '').trim();
+  if(!raw){ alert('Enter at least one symbol'); return; }
+  if(!budget || budget <= 0){ alert('Enter a positive budget'); return; }
+  const symbols = raw.split(',').map(s => s.trim()).filter(Boolean).slice(0,8); // limit 8 for demo
+
+  // clear UI
+  document.getElementById('chartsInner').innerHTML = '';
+  document.getElementById('summary').textContent = 'Analyzing... this may take 5-20 seconds (API throttling considered)';
+
+  const results = {}; // per symbol: {series, lastPrice, predicted}
+  for(let i=0;i<symbols.length;i++){
+    const s = symbols[i].toUpperCase();
+    // try fetch, else fallback
+    let series = null;
+    if (key) {
+      series = await fetchTimeSeries(s, key);
+      // be polite: throttle
+      if (i < symbols.length-1) await sleep(RATE_LIMIT_MS);
+    }
+    if (!series) {
+      series = synthSeries(s, DAYS);
+    }
+    const lastPrice = series[series.length-1].close;
+    // train tiny model and predict next
+    let predicted = null;
+    try {
+      predicted = await trainAndPredict(series);
+      if (!predicted || !isFinite(predicted)) predicted = lastPrice;
+    } catch(e){
+      console.warn('model error', e);
+      predicted = lastPrice;
+    }
+    results[s] = { series, lastPrice, predicted };
+  }
+
+  // compute predicted return% and scoring
+  const scores = {};
+  for(const s of Object.keys(results)){
+    const r = results[s];
+    r.predReturn = (r.predicted - r.lastPrice) / r.lastPrice; // decimal
+    // simple score: predReturn * volatility-adjusted factor (approx)
+    // compute volatility as stddev of daily returns
+    const prices = r.series.map(x=>x.close);
+    const dailyR = [];
+    for(let k=1;k<prices.length;k++) dailyR.push((prices[k]-prices[k-1]) / prices[k-1]);
+    const mean = dailyR.reduce((a,b)=>a+b,0)/dailyR.length || 0;
+    const std = Math.sqrt(dailyR.reduce((a,b)=>a+(b-mean)**2,0)/dailyR.length) || 1e-6;
+    r.vol = std;
+    // score: normalized predReturn / vol
+    scores[s] = (r.predReturn) / (r.vol + 1e-9);
+  }
+
+  // allocation: allocate only to positive predicted returns proportionally
+  const positive = Object.entries(results).filter(([s,r])=> r.predReturn > 0);
+  let allocation = {};
+  if (positive.length === 0) {
+    // no positive predictions: equal split but warn user
+    const per = budget / Object.keys(results).length;
+    for(const s of Object.keys(results)){
+      const qty = Math.floor(per / results[s].lastPrice);
+      allocation[s] = { allocAmount: qty * results[s].lastPrice, qty };
+    }
+  } else {
+    // weights from predReturn (or scores)
+    const weights = {};
+    let sumw = 0;
+    for(const [s,r] of positive){
+      const w = Math.max(r.predReturn, 0.0001); // tiny floor
+      weights[s] = w; sumw += w;
+    }
+    for(const [s,r] of Object.entries(results)){
+      if (!weights[s]) { allocation[s] = { allocAmount: 0, qty: 0 }; continue; }
+      const amt = Math.floor((budget * (weights[s]/sumw)) / results[s].lastPrice) * results[s].lastPrice;
+      const qty = Math.floor((budget * (weights[s]/sumw)) / results[s].lastPrice);
+      allocation[s] = { allocAmount: Math.round(amt*100)/100, qty };
+    }
+  }
+
+  // compute totals & expected portfolio return (weighted by allocated amount)
+  const totalInvested = Object.values(allocation).reduce((a,b)=>a+(b.allocAmount||0),0);
+  let expectedAnnualReturn = 0;
+  if (totalInvested > 0){
+    for(const s of Object.keys(results)){
+      const w = allocation[s].allocAmount / totalInvested || 0;
+      expectedAnnualReturn += w * (results[s].predReturn*252); // rough annualized
+    }
+  }
+
+  // Render UI
+  renderCharts(results);
+  renderAllocationTable(results, allocation, budget, totalInvested, expectedAnnualReturn);
+  document.getElementById('summary').textContent = 'Analysis done. Predictions are quick, explainable estimates — not financial advice.';
+}
+
+/* ---------- Render per-stock chart (historical + predicted) ---------- */
+function renderCharts(results){
+  const container = document.getElementById('chartsInner');
+  container.innerHTML = '';
+  for(const s of Object.keys(results)){
+    const r = results[s];
+    // create DOM
+    const card = document.createElement('div');
+    card.className = 'stockCard';
+    card.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div><strong style="font-size:16px">${s}</strong><div class="small muted">Last: ₹${format2(r.lastPrice)}</div></div>
+        <div style="text-align:right">
+          <div class="${r.predReturn>=0?'profit':'loss'}">${(r.predReturn*100).toFixed(2)}%</div>
+          <div class="small muted">Pred: ₹${format2(r.predicted)}</div>
+        </div>
+      </div>
+      <canvas id="chart_${s}" height="120"></canvas>
+    `;
+    container.appendChild(card);
+
+    // chart data
+    const labels = r.series.map(p=>p.date);
+    const dataHist = r.series.map(p=>p.close);
+    const ctx = card.querySelector('canvas').getContext('2d');
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Price', data: dataHist, borderColor: '#60a5fa', tension:0.25, pointRadius:0 },
+          { label: 'Predicted (next)', data: [...dataHist.slice(-1), r.predicted], borderColor: r.predReturn>=0 ? '#34d399' : '#fb7185', pointRadius:4, fill:false, segment:{borderDash:[6,4]} }
+        ]
+      },
+      options: {
+        plugins:{legend:{display:false}},
+        scales:{x:{display:false}, y:{ticks:{color:'#cbd5e1'}}}
+      }
+    });
+  }
+}
+
+/* ---------- Render allocation table ---------- */
+function renderAllocationTable(results, allocation, budget, totalInvested, expectedAnnualReturn){
+  const div = document.getElementById('allocTable');
+  let html = `<table><thead><tr><th>Symbol</th><th>Last Price</th><th>Pred %</th><th>Qty</th><th>Allocated (₹)</th><th>Est. Annualized %</th></tr></thead><tbody>`;
+  for(const s of Object.keys(results)){
+    const r = results[s];
+    const a = allocation[s] || {allocAmount:0, qty:0};
+    html += `<tr>
+      <td>${s}</td>
+      <td>₹${format2(r.lastPrice)}</td>
+      <td class="${r.predReturn>=0?'profit':'loss'}">${(r.predReturn*100).toFixed(2)}%</td>
+      <td>${a.qty}</td>
+      <td>₹${format2(a.allocAmount)}</td>
+      <td>${(r.predReturn*252*100).toFixed(2)}%</td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+  html += `<div style="margin-top:10px" class="small muted"><b>Total budget:</b> ₹${format2(budget)} • <b>Total invested:</b> ₹${format2(totalInvested)} • <b>Remaining:</b> ₹${format2(budget - totalInvested)}</div>`;
+  html += `<div style="margin-top:8px" class="small muted"><b>Expected (rough) annualized portfolio return:</b> ${(expectedAnnualReturn*100).toFixed(2)}%</div>`;
+  div.innerHTML = html;
+}
+</script>
+</body>
+</html>
