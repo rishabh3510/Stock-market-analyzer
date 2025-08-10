@@ -3,7 +3,6 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Stock Market Analyzer - README</title>
 </head>
 <body>
   <h1>📈 Stock Market Analyzer</h1>
