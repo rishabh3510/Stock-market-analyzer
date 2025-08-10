@@ -4,40 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Stock Market Analyzer - README</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      max-width: 800px;
-      margin: 40px auto;
-      padding: 0 20px;
-      line-height: 1.6;
-      background: #f9f9f9;
-      color: #333;
-    }
-    h1, h2, h3 {
-      color: #2c3e50;
-    }
-    pre {
-      background: #2d2d2d;
-      color: #f8f8f2;
-      padding: 15px;
-      border-radius: 6px;
-      overflow-x: auto;
-    }
-    code {
-      font-family: monospace;
-    }
-    .section {
-      margin-bottom: 40px;
-    }
-    ul {
-      list-style: inside disc;
-    }
-    .emoji {
-      font-size: 1.2em;
-      margin-right: 8px;
-    }
-  </style>
 </head>
 <body>
   <h1>📈 Stock Market Analyzer</h1>
@@ -52,7 +18,6 @@
       <li>📊 Clean and intuitive interface for quick insights</li>
     </ul>
   </div>
-  
   <div class="section">
     <h2>🛠️ Technologies Used</h2>
     <ul>
